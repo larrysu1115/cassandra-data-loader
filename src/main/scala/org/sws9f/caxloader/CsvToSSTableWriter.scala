@@ -11,9 +11,9 @@ import org.slf4j.{Logger,LoggerFactory}
 //object CaxSSTableWriterTranx extends App with LazyLogging {
 object CsvToSSTableWriter extends App {
   val log = LoggerFactory.getLogger(this.getClass)
-  
-  case class Config(keyspace:String = "", table:String="", columns:Seq[(String,String)] = Seq(), pk:String="", csv:String="", output:String="", dryRun:Boolean=false)
-  
+
+  case class Config(keyspace:String = "", table:String="", columns:Seq[(String,String)] = Seq(), pk:String="", csv:String="", output:String="", dryRun:Boolean=false, delimiter:Char = ',')
+
   val parser = new scopt.OptionParser[Config]("scopt") {
     head("scopt", "1.0")
     opt[String]('k', "keyspace") required() action { (x,c) =>
@@ -28,32 +28,40 @@ object CsvToSSTableWriter extends App {
       c.copy(output = x) } text("output folder path")
     opt[Boolean]('d', "dry-run") action { (x,c) =>
       c.copy(dryRun = x) } text("dry run, only output CREATE TABLE/INSERT ROW scripts")
+    opt[String]('l', "delimiter") action { (x,c) =>
+      c.copy(delimiter = x match {
+        case "\\t" => '\t'
+        case x => x.head
+      }) } text("delimiter, defaults to ','")
     opt[Seq[(String,String)]]('c', "columns") required() action { (x,c) =>
       c.copy(columns = x) } text("columns name & data-type")
   }
-  
+
   val cfgOption = parser.parse(args, Config())
   if (cfgOption == None) sys.exit(1)
   val cfg = cfgOption.get
-  
+
   val scriptCreateTable = getScriptCreateTable(cfg)
   log.info(s"Create table script:\n$scriptCreateTable")
   val scriptInsert = getScriptInsert(cfg)
   log.info(s"Insert row script:\n$scriptInsert")
-  
+
   if (cfg.dryRun) sys.exit(0)
-  resetFolder(cfg.output)  
+  resetFolder(cfg.output)
   doInsertSstable(cfg)
   log.info("End.")
-  
+
   def doInsertSstable(cfg:Config) = {
     val writer: CQLSSTableWriter = CQLSSTableWriter.builder()
                                                   .inDirectory(cfg.output)
                                                   .forTable(scriptCreateTable)
                                                   .using(scriptInsert).build();
     val epochMiddle = scala.math.pow(2,31).toInt + 1
+    implicit object MyFormat extends DefaultCSVFormat {
+      override val delimiter = cfg.delimiter
+    }
     val reader = CSVReader.open(cfg.csv)
-    
+
     try {
       var line = reader.readNext()
       var lineCount = 0L
@@ -65,7 +73,7 @@ object CsvToSSTableWriter extends App {
           case c if c._2 == "double"  => line.get(i).toDouble.asInstanceOf[Object]
           case c if c._2 == "date"    => (LocalDate.parse(line.get(i)).toEpochDay().toInt + epochMiddle).asInstanceOf[Object]
         }
-      
+
         if (lineCount % 100000 == 0) log.info(f"Inserting row $lineCount%,9d : ${colValues}")
         writer.addRow(colValues.asJava)
         line = reader.readNext()
@@ -77,9 +85,9 @@ object CsvToSSTableWriter extends App {
       writer.close
       reader.close
     }
-    
+
   }
-  
+
   def getScriptCreateTable(cfg:Config) = {
     """CREATE TABLE [ks].[table] ( [columns]
     |  PRIMARY KEY ([pk])
@@ -89,7 +97,7 @@ object CsvToSSTableWriter extends App {
     .replace("[table]", cfg.table)
     .replace("[pk]", cfg.pk)
   }
-  
+
   def getScriptInsert(cfg:Config) = {
     "INSERT INTO [ks].[table] ([columns]) VALUES ([qmarks]);"
     .replace("[ks]", cfg.keyspace)
@@ -97,7 +105,7 @@ object CsvToSSTableWriter extends App {
     .replace("[columns]", cfg.columns.foldLeft("")( (x,y) => if (x.length > 0) s"$x, ${y._1}" else y._1 ) )
     .replace("[qmarks]", cfg.columns.foldLeft("")( (x,y) => if (x.length > 0) s"$x, ?" else "?" ) )
   }
-  
+
   def resetFolder(path: String) {
     val destPath: Path = Path.fromString(path)
     if (destPath.exists) {
@@ -112,4 +120,3 @@ object CsvToSSTableWriter extends App {
     destPath.createDirectory()
   }
 }
-
